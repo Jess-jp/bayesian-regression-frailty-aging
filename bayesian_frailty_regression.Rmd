@@ -1,0 +1,417 @@
+---
+title: "Bayesian vs Classical Regression: Modeling Frailty in Aging Using Real Health Survey Data"
+author: "Jessica de la Cruz Parayno"
+output: html_document
+---
+
+Group project note: each member independently built their own implementation before the group met to compare approaches and refine conclusions together. The code, analysis, and interpretation shown here are my own individual work.
+
+# Punto 1: Carga y Análisis de Datos
+
+```{r}
+library(foreign)
+
+## Carga de datos
+data <- read.dta("data/mhas_2012_survey.dta  # Mexican Health and Aging Study (MHAS) 2012 wave")
+
+##  Selección de variables
+myvars2 <- c("yrschool_12", "sex_12", "age_12", "d4_12", "tam_loc_12", "h13_12_d_2", "h5_12_d_2", "h15d_12_d", "h17d_12_d", "h16d_12_d", "h19d_12_d", "h7_12_d_2", "h11_12_d_2", "h27c_12_d_2", "h26c_12_d_2", "h28c_12_d_2", "h29c_12_d_2", "c64_12_d", "c1_12_d", "c2a_12_d", "c73_12_d", "c49_8_12_d", "h3_12_d_2", "c49_2_12_d", "c49_1_12_d", "c49_4_12_d", "c49_5_12_d", "c49_9_12_d", "c4_12_d", "c22a_12_d", "c25b_12_d", "c26_12_d", "c12_12_menos10_d", "c6_12_d", "c32_12_d", "c19_12_d", "e1b_12_d", "c69a_12_d", "c70_12_d", "c50b_12_d")
+
+##  Subconjunto sin NA
+data2_na <- data[myvars2]
+data2 <- na.omit(data2_na)
+
+## Resumen de datos
+summary(data2)
+str(data2)
+
+##  Creación de variable binaria
+data2$tam_loc_bin <- ifelse(as.character(data2$tam_loc_12) == "4.Population <2,500", 0, 1)
+
+## Convertimos variables en numéricas
+data2$yrschool_12 <- as.numeric(data2$yrschool_12)
+data2$sex_12 <- as.numeric(data2$sex_12)
+data2$age_12 <- as.numeric(data2$age_12)
+data2$d4_12 <- as.numeric(data2$d4_12)
+data2$tam_loc_12 <- as.numeric(gsub("[^0-9]", "", as.character(data2$tam_loc_12)))
+
+##  Checkeamos que todas las variables sean numéricas
+str(data2)
+```
+
+# Punto 2: Construcción Variable Independiente
+
+```{r}
+## Aplicamos kmeans y vemos media de cada variable en cada grupo
+usa_km <- kmeans(data2, 2)
+medias_grupos <- lapply(1:2, function(nc) apply(data2[usa_km$cluster == nc, ], 2, mean))
+medias_grupos
+
+data2$Grupo2 <- usa_km$cluster
+
+```
+
+# Punto 3: Identificación de Variables Input para el Modelo
+
+```{r}
+data2$Grupo2 <- ifelse(data2$Grupo2 == 1, 0, 1)
+
+##  Modelo GLM controlado
+modelo_controlado <- glm(Grupo2 ~ sex_12 + age_12 + h13_12_d_2 + tam_loc_bin, 
+                         data = data2, 
+                         family = binomial)
+summary(modelo_controlado)
+```
+
+# Punto 4: Generación de Modelos
+
+
+```{r}
+##  Para cada modelo se imprime un resumen donde podemos ver los coeficientes, los errores estándar y los valores p
+
+library(rstanarm)
+library(bayestestR)
+
+## CREACIÓN DEL ÍNDICE DE FRAGILIDAD
+
+##  El índice de fragilidad es el promedio de los déficits
+data2$fragility_index <- rowMeans(data2[, c("h13_12_d_2", "h5_12_d_2", "h15d_12_d", "h17d_12_d", 
+                                            "h16d_12_d", "h19d_12_d", "h7_12_d_2", "h11_12_d_2", 
+                                            "h27c_12_d_2", "h26c_12_d_2", "h28c_12_d_2", "h29c_12_d_2",
+                                            "c64_12_d", "c1_12_d", "c2a_12_d", "c73_12_d", "c49_8_12_d", 
+                                            "h3_12_d_2", "c49_2_12_d", "c49_1_12_d", "c49_4_12_d", 
+                                            "c49_5_12_d", "c49_9_12_d", "c4_12_d", "c22a_12_d", "c25b_12_d",
+                                            "c26_12_d", "c12_12_menos10_d", "c6_12_d", "c32_12_d", "c19_12_d", 
+                                            "e1b_12_d", "c69a_12_d", "c70_12_d", "c50b_12_d")], 
+                                  na.rm = TRUE)
+
+
+##   CREACIÓN DE GRUPOS DE FRAGILIDAD
+
+##  Aplicamos k-means para dividir en dos grupos (alta fragilidad y baja fragilidad)
+usa_km <- kmeans(data2[, c("fragility_index")], centers = 2)
+data2$Grupo_fragilidad <- usa_km$cluster
+
+##  Reetiquetado (0 = Baja fragilidad, 1 = Alta fragilidad)
+data2$Grupo_fragilidad <- ifelse(data2$Grupo_fragilidad == 1, 0, 1)
+
+##Dividimos los datos en train y test
+library(caret)
+index <- createDataPartition(data2$Grupo_fragilidad, p = 0.8, list = FALSE)
+train_data2 <- data2[index,]
+test_data2 <- data2[-index,]
+
+
+##   MODELOS CLÁSICOS (SIN VARIABLES DE CONTROL)
+
+##  Índice de fragilidad - Modelo Clásico (Normal)
+## El coeficiente para yrschool_12 es negativo, lo cual indica que más años de escolaridad están asociados con un menor índice de fragilidad
+
+modelo_clasico_indice <- lm(fragility_index ~ yrschool_12, data = train_data2)
+summary(modelo_clasico_indice)
+
+
+##  Grupos de fragilidad - Modelo Clásico (Logístico)
+## El modelo es estadísticamente significativo, ya que el p-valor para yrschool_12 es prácticamente 0
+modelo_clasico_grupos <- glm(Grupo_fragilidad ~ yrschool_12,
+                             data = train_data2,
+                             family = binomial)
+summary(modelo_clasico_grupos)
+
+
+##   MODELOS BAYESIANOS (SIN VARIABLES DE CONTROL)
+
+##  Índice de fragilidad - Modelo Bayesiano (Normal)
+##El coeficiente de yrschool_12 es 0.0 en el modelo bayesiano, con un intervalo de credibilidad muy estrecho, lo cual indica que la educación no tiene un impacto significativo sobre el índice de fragilidad
+modelo_bayes_indice <- stan_glm(fragility_index ~ yrschool_12,
+                                data = train_data2,
+                                family = gaussian,
+                                iter = 2000, 
+                                chains = 4)
+summary(modelo_bayes_indice)
+
+##  Grupos de fragilidad - Modelo Bayesiano (Logístico)
+##El modelo bayesiano logístico indica que los años de escolaridad aumentan ligeramente la probabilidad de pertenecer al grupo de alta fragilidad
+
+modelo_bayes_grupos <- stan_glm(Grupo_fragilidad ~ yrschool_12,
+                                data = train_data2,
+                                family = binomial,
+                                iter = 2000, 
+                                chains = 4)
+summary(modelo_bayes_grupos)
+
+
+##   MODELOS CLÁSICOS (CON VARIABLES DE CONTROL)
+##  Índice de fragilidad con control (Normal)
+
+##El modelo con variables de control mejora el ajuste respecto al modelo clásico simple. Ahora explica un 13.26% de la variabilidad, frente al 3.5% que explicaba sin control
+modelo_clasico_indice_control <- lm(fragility_index ~ yrschool_12 + sex_12 + age_12 + d4_12 + tam_loc_bin, 
+                                    data = train_data2)
+summary(modelo_clasico_indice_control)
+
+##  Grupos de fragilidad con control (Logístico)
+
+##La escolaridad aumenta la probabilidad de pertenecer al grupo de alta fragilidad. Esto es consistente con el modelo logístico simple y también con el modelo bayesiano logístico
+##El género reduce significativamente la probabilidad de fragilidad. Esto podría implicar una diferencia notoria entre hombres y mujeres
+##El modelo es significativamente mejor que un modelo sin predictores, dado que la devianza se reduce notablemente
+
+modelo_clasico_grupos_control <- glm(Grupo_fragilidad ~ yrschool_12 + sex_12 + age_12 + d4_12 + tam_loc_bin,
+                                     data = train_data2,
+                                     family = binomial)
+summary(modelo_clasico_grupos_control)
+
+
+##   MODELOS BAYESIANOS (CON VARIABLES DE CONTROL)
+## Índice de fragilidad con control (Normal)
+
+##La escolaridad no tiene un impacto visible en el índice de fragilidad
+##Los coeficientes en el modelo bayesiano se reducen en comparación con el modelo clásico
+modelo_bayes_indice_control <- stan_glm(fragility_index ~ yrschool_12 + sex_12 + age_12 + d4_12 + tam_loc_bin,
+                                        data = train_data2,
+                                        family = gaussian,
+                                        iter = 2000, 
+                                        chains = 4)
+summary(modelo_bayes_indice_control)
+
+##  Grupos de fragilidad con control (Logístico)
+##La escolaridad aumenta la probabilidad de pertenecer al grupo de alta fragilidad. Esto es consistente con el modelo clásico logístico,
+##El modelo bayesiano es más conservador que el clásico, pero confirma tendencias claras y significativas
+modelo_bayes_grupos_control <- stan_glm(Grupo_fragilidad ~ yrschool_12 + sex_12 + age_12 + d4_12 + tam_loc_bin,
+                                        data = train_data2,
+                                        family = binomial,
+                                        iter = 2000, 
+                                        chains = 4)
+summary(modelo_bayes_grupos_control)
+
+
+```
+
+# Punto 5: Analizar los modelos
+
+
+```{r}
+library(bayesplot)
+
+## Selecionamos las variables predictoras para nuestros modelos
+predict_vars <- c("yrschool_12", "sex_12", "age_12", "d4_12", "tam_loc_bin")
+
+## Creamos dos funciones (una para modelos clasicos y otra para modelos bayesianos) 
+## realizaran la visualizacion y analisis de los modelos así como evaluar la significancia 
+## de las distintas variables predictoras
+
+# Funcion para modelos bayesianos:
+analisis_model_bayes <- function(modelo, nombre, predict_vars){
+  cat("\nAnálisis del modelo:", nombre, "\n")
+  
+  cat("\nVisualización de densidades MCMC:\n")
+  print(mcmc_dens(modelo, pars = predict_vars))
+  
+  cat("\nEstadísticas del modelo:\n")
+  hdi_results <- hdi(modelo, ci = 0.95)
+  print(hdi_results)
+  
+  cat("\nSignificancia de los coeficientes: (HDI no contiene el 0)\n")
+  for (param in predict_vars) {
+    hdi_param <- hdi_results[hdi_results$Parameter == param, ]
+    if (0 < hdi_param$CI_low | 0 > hdi_param$CI_high) {
+      cat(" -", param, ": Significativo (HDI no contiene el 0)\n")
+    } else {
+      cat(" -", param, ": No significativo (HDI contiene el 0)\n")
+    }
+  }
+}
+
+# Funcion para modelos clasicos:
+analisis_model_classic <- function(modelo, nombre){
+  cat("\nAnálisis del modelo:", nombre, "\n")
+  print(summary(modelo))
+  
+  cat("\nSignificancia de los coeficientes (p-valor < 0.05):\n")
+  coef_summary <- summary(modelo)$coefficients
+  for (i in 1:nrow(coef_summary)) {
+    param <- rownames(coef_summary)[i]
+    p_value <- coef_summary[i, 4]
+    if (p_value < 0.05) {
+      cat(" -", param, ": Significativo (p =", p_value, ")\n")
+    } else {
+      cat(" -", param, ": No significativo (p =", p_value, ")\n")
+    }
+  }
+}
+
+## Análisis de los modelos clásicos (sin control)
+analisis_model_classic(modelo_clasico_indice, "Clásico Índice (Sin control)")
+analisis_model_classic(modelo_clasico_grupos, "Clásico Grupos (Sin control)")
+
+##  Análisis de los modelos bayesianos (sin control)
+analisis_model_bayes(modelo_bayes_indice, "Bayesiano Índice (Sin control)", "yrschool_12")
+analisis_model_bayes(modelo_bayes_grupos, "Bayesiano Grupos (Sin control)", "yrschool_12")
+
+##  Análisis de los modelos clásicos (con control)
+analisis_model_classic(modelo_clasico_indice_control, "Clásico Índice (Con control)")
+analisis_model_classic(modelo_clasico_grupos_control, "Clásico Grupos (Con control)")
+
+##  Análisis de los modelos bayesianos (con control)
+analisis_model_bayes(modelo_bayes_indice_control, "Bayesiano Índice (Con control)", predict_vars)
+analisis_model_bayes(modelo_bayes_grupos_control, "Bayesiano Grupos (Con control)", predict_vars)
+
+##  Visualización adicional: Comparación de coeficientes entre modelos bayesianos
+cat("\nComparación de coeficientes bayesianos (Índice con control)\n")
+mcmc_intervals(modelo_bayes_indice_control, pars = predict_vars)
+
+cat("\nComparación de coeficientes bayesianos (Grupos con control)\n")
+mcmc_intervals(modelo_bayes_grupos_control, pars = predict_vars)
+
+
+```
+
+# Punto 6 y 7: Predicciones
+
+
+```{r}
+
+## Predicciones con el modelo de regresión entre escolaridad y el índice de fragilidad
+##  controlado por las otras variables.
+
+##  Observamos el modelo y realizamos predicciones usando el conjunto de test
+summary(modelo_clasico_indice_control)
+
+y_pred <- predict(modelo_clasico_indice_control, newdata = test_data2)
+
+##  Como podemos observar el modelo de regresión para el indice de fragilidad usando variables de
+##  control tiene un R^2 = 0.128, el valor es bajo y no indica el el solo el 12,8% de la variable
+##  output es representado por las variables inputs. Como podemos observar a continuación en el grafico
+##  entre los valores reales y predichos el modelo no es capaz de relacionar aquellos outputs que se
+##  encuentran fuera de la zona con más densidad. 
+
+plot(test_data2$fragility_index, ylim = c(0,0.7), ylab = "Índice de fragilidad", 
+     xlab = "Índice de variables", main = "Gráfico de predicciones",col = "blue", pch = 3)
+points(y_pred, col = "red", pch = 4)
+
+##  Cáluclo del MSE : Nos índica la diferéncia entre el estimador y lo que estima
+mse_train <- mean(residuals(modelo_clasico_indice_control)^2)
+mse <- mean((test_data2$fragility_index - y_pred)^2)
+print(paste("MSE del modelo (conjunto de entrenamiento", mse_train))
+print(paste("MSE de las predicciones (conjunto de preba)", mse))
+
+##  Observamos que los MSE tanto usando el modelo como las predicciones es bastante similar. 
+##  Aunque a simple vista nos parezca que el MSE es bajo realmente no lo es, hay que tener en cuenta que 
+##  nuestro índice de fragilidad se mueve entre el 0 y el 0,1 y que una diferéncia de 0.01 es 
+##  significativa como podemos observar en el gráfico. Podemos concluir que el modelo de 
+##  regresión clasica sobre el indice de fragilidad usando los grupos de control no es bueno.
+
+```
+
+# Punto 8: Analizar los modelos
+
+
+```{r}
+
+library(ggplot2)
+library(loo)
+library(caret)
+library(pROC)
+
+## Creamos una función para la comparacion de coeficientes entre entre los modelos clásicos 
+## y los bayesianos
+
+compare_coefficients <- function(model_classic, model_bayes, model_name, predict_vars) {
+  cat("\nComparación de coeficientes para:", model_name, "\n")
+  
+  ##  Coeficientes clásicos
+  coef_classic <- summary(model_classic)$coefficients
+  cat("\nCoeficientes clásicos:\n")
+  print(coef_classic)
+  
+  ##  Coeficientes bayesianos (media y HDI 95%)
+  cat("\nCoeficientes bayesianos (media y HDI 95%):\n")
+  for (param in predict_vars) {
+    post_samples <- as.matrix(model_bayes)[, param]
+    mean_val <- mean(post_samples)
+    hdi_val <- hdi(post_samples, ci = 0.95)
+    cat(param, ": Media =", mean_val, ", HDI 95% = [", hdi_val$CI_low, ", ", hdi_val$CI_high, "]\n")
+  }
+  
+  ##  Visualización de densidades MCMC para el modelo bayesiano
+  cat("\nVisualización de densidades MCMC para el modelo bayesiano:\n")
+  print(mcmc_dens(model_bayes, pars = predict_vars))
+}
+
+##  Función para comparar predicciones en el conjunto de test
+compare_predictions <- function(model_classic, model_bayes, test_data, outcome_var, model_name, is_binary = FALSE) {
+  cat("\n=== Comparación de predicciones para:", model_name, "===\n")
+  
+  ##  Predicciones clásicas
+  if (is_binary) {
+    y_pred_classic <- predict(model_classic, newdata = test_data, type = "response")
+    y_pred_classic_bin <- ifelse(y_pred_classic > 0.5, 1, 0)
+  } else {
+    y_pred_classic <- predict(model_classic, newdata = test_data)
+  }
+  
+  ##  Predicciones bayesianas
+  y_pred_bayes <- posterior_predict(model_bayes, newdata = test_data)
+  if (is_binary) {
+    y_pred_bayes_mean <- apply(y_pred_bayes, 2, mean)
+    y_pred_bayes_bin <- ifelse(y_pred_bayes_mean > 0.5, 1, 0)
+  } else {
+    y_pred_bayes_mean <- apply(y_pred_bayes, 2, mean)
+  }
+  
+  ##  Calcular métricas
+  if (!is_binary) {
+    mse_classic <- mean((test_data[[outcome_var]] - y_pred_classic)^2)
+    mse_bayes <- mean((test_data[[outcome_var]] - y_pred_bayes_mean)^2)
+    cat("MSE Clásico:", mse_classic, "\n")
+    cat("MSE Bayesiano:", mse_bayes, "\n")
+  } else {
+    accuracy_classic <- mean(y_pred_classic_bin == test_data[[outcome_var]])
+    accuracy_bayes <- mean(y_pred_bayes_bin == test_data[[outcome_var]])
+    cat("Accuracy Clásico:", accuracy_classic, "\n")
+    cat("Accuracy Bayesiano:", accuracy_bayes, "\n")
+  }
+}
+
+##  Comparación de modelos sin control
+cat("\n=== Modelos sin control ===\n")
+
+##  Índice de fragilidad (sin control)
+compare_coefficients(modelo_clasico_indice, modelo_bayes_indice, "Índice sin control", c("(Intercept)", "yrschool_12"))
+compare_predictions(modelo_clasico_indice, modelo_bayes_indice, test_data2, "fragility_index", "Índice sin control")
+
+##  Grupos de fragilidad (sin control)
+compare_coefficients(modelo_clasico_grupos, modelo_bayes_grupos, "Grupos sin control", c("(Intercept)", "yrschool_12"))
+compare_predictions(modelo_clasico_grupos, modelo_bayes_grupos, test_data2, "Grupo_fragilidad", "Grupos sin control", is_binary = TRUE)
+
+##  Comparación de modelos con control
+cat("\n=== Modelos con control ===\n")
+
+##  Índice de fragilidad (con control)
+predict_vars_control <- c("(Intercept)", "yrschool_12", "sex_12", "age_12", "d4_12", "tam_loc_bin")
+compare_coefficients(modelo_clasico_indice_control, modelo_bayes_indice_control, "Índice con control", predict_vars_control)
+compare_predictions(modelo_clasico_indice_control, modelo_bayes_indice_control, test_data2, "fragility_index", "Índice con control")
+
+##  Grupos de fragilidad (con control)
+compare_coefficients(modelo_clasico_grupos_control, modelo_bayes_grupos_control, "Grupos con control", predict_vars_control)
+compare_predictions(modelo_clasico_grupos_control, modelo_bayes_grupos_control, test_data2, "Grupo_fragilidad", "Grupos con control", is_binary = TRUE)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
